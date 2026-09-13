@@ -5,7 +5,7 @@ from PIL import Image
 import io
 
 # API Base URL (must match your running FastAPI server)
-API_URL = "http://127.0.0.1:8000"
+API_URL = "https://computer-vision-oao9.onrender.com"
 
 st.set_page_config(
     page_title="Persian ALPR Dashboard",
