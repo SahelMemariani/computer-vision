@@ -101,9 +101,13 @@ def format_persian_plate(raw_text):
 # 5. Localization & Segmentation Pipeline
 def locate_and_crop_plate_gradient(img_bgr):
     h_img, w_img = img_bgr.shape[:2]
-    ymin, ymax = int(h_img * 0.45), int(h_img * 0.88)
-    xmin, xmax = int(w_img * 0.1), int(w_img * 0.9)
+    # Expand search zone to wider lower/middle part of image
+    ymin, ymax = int(h_img * 0.35), int(h_img * 0.92)
+    xmin, xmax = int(w_img * 0.05), int(w_img * 0.95)
     roi = img_bgr[ymin:ymax, xmin:xmax]
+    
+    if roi.size == 0:
+        return img_bgr
     
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
@@ -124,7 +128,8 @@ def locate_and_crop_plate_gradient(img_bgr):
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
         aspect_ratio = float(w) / float(h if h > 0 else 1)
-        if 2.8 < aspect_ratio < 6.2 and w > 50 and h > 10:
+        # Wider aspect ratio tolerance for angled plates
+        if 2.0 < aspect_ratio < 7.0 and w > 35 and h > 8:
             candidates.append((w * h, x, y, w, h))
             
     if candidates:
@@ -134,12 +139,14 @@ def locate_and_crop_plate_gradient(img_bgr):
         gy1 = max(0, ymin + cy - int(ch * 0.2))
         gx2 = min(w_img, xmin + cx + cw + int(cw * 0.05))
         gy2 = min(h_img, ymin + cy + ch + int(ch * 0.2))
-        return img_bgr[gy1:gy2, gx1:gx2]
+        crop_candidate = img_bgr[gy1:gy2, gx1:gx2]
+        if crop_candidate.size > 0:
+            return crop_candidate
         
     return roi
 
 def api_segment_and_recognize(cropped_plate_bgr):
-    cropped_plate = cropped_plate_bgr
+    cropped_plate = cropped_plate_bgr if cropped_plate_bgr is not None and cropped_plate_bgr.size > 0 else np.zeros((50, 150, 3), dtype=np.uint8)
     gray = cv2.cvtColor(cropped_plate, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4))
     enhanced_gray = clahe.apply(gray)
@@ -154,7 +161,8 @@ def api_segment_and_recognize(cropped_plate_bgr):
         x, y, bw, bh = cv2.boundingRect(c)
         aspect_ratio = bw / float(bh if bh>0 else 1)
         height_ratio = bh / float(plate_height if plate_height>0 else 1)
-        if 0.1 < aspect_ratio < 0.85 and 0.3 < height_ratio < 0.95 and bw < plate_width * 0.25:
+        # Relaxed character filtering bounds
+        if 0.05 < aspect_ratio < 0.95 and 0.2 < height_ratio < 0.98 and bw < plate_width * 0.35:
             char_bounding_boxes.append((x, y, bw, bh))
             
     char_bounding_boxes = sorted(char_bounding_boxes, key=lambda b: b[0])
