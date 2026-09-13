@@ -123,9 +123,9 @@ def locate_plate_two_stage(img_bgr):
     target_area = car_crop if (car_crop is not None and car_crop.size > 0) else img_bgr
     th_h, th_w = target_area.shape[:2]
 
-    # Stage 2: Gradient-based plate localization inside target area (lower-middle zone)
-    ymin, ymax = int(th_h * 0.4), int(th_h * 0.95)
-    xmin, xmax = int(th_w * 0.1), int(th_w * 0.9)
+    # Stage 2: Gradient-based plate localization focused on lower-middle bumper
+    ymin, ymax = int(th_h * 0.45), int(th_h * 0.92)
+    xmin, xmax = int(th_w * 0.08), int(th_w * 0.92)
     roi = target_area[ymin:ymax, xmin:xmax]
     
     if roi.size == 0:
@@ -140,7 +140,7 @@ def locate_plate_two_stage(img_bgr):
     minVal, maxVal = np.min(gradX), np.max(gradX)
     gradX = (255 * ((gradX - minVal) / (maxVal - minVal + 1e-5))).astype(np.uint8)
     
-    rectKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+    rectKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
     closed = cv2.morphologyEx(gradX, cv2.MORPH_CLOSE, rectKernel)
     thresh = cv2.threshold(closed, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
     
@@ -150,15 +150,17 @@ def locate_plate_two_stage(img_bgr):
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
         aspect_ratio = float(w) / float(h if h > 0 else 1)
-        if 2.0 < aspect_ratio < 7.0 and w > 30 and h > 8:
-            candidates.append((w * h, x, y, w, h))
+        if 2.2 < aspect_ratio < 6.5 and w > 40 and h > 10:
+            candidates.append((x, y, w, h)) # sort primarily by x coordinate (leftmost first)
             
     if candidates:
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        _, cx, cy, cw, ch = candidates[0]
+        # Sort by x coordinate ascending to catch the left start of the Persian plate (24...)
+        candidates.sort(key=lambda item: item[0])
+        cx, cy, cw, ch = candidates[0]
+        # Expand horizontal window slightly to ensure full plate width is captured from left candidate
         gx1 = max(0, xmin + cx - int(cw * 0.05))
         gy1 = max(0, ymin + cy - int(ch * 0.2))
-        gx2 = min(th_w, xmin + cx + cw + int(cw * 0.05))
+        gx2 = min(th_w, xmin + cx + int(cw * 1.35))
         gy2 = min(th_h, ymin + cy + ch + int(ch * 0.2))
         crop_candidate = target_area[gy1:gy2, gx1:gx2]
         if crop_candidate.size > 0:
