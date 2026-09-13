@@ -10,6 +10,14 @@ import numpy as np
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, HTTPException
 import torchvision.transforms as transforms
+from ultralytics import YOLO
+
+# Load YOLOv8 nano for vehicle bounding box isolation
+try:
+    yolo_vehicle_model = YOLO("yolov8n.pt")
+except Exception as e:
+    print(f"[WARNING] YOLO load fallback: {e}")
+    yolo_vehicle_model = None
 
 # 1. Database Setup
 DB_NAME = "alpr_history.db"
@@ -77,11 +85,6 @@ except FileNotFoundError:
 
 # 4. Post-processing & Structural Rule Enforcement
 def format_persian_plate(raw_text):
-    """
-    Cleans and enforces standard Iranian national license plate schema format:
-    [2 Digits] [Persian Letter] [3 Digits]
-    """
-    # Extract all Persian digits and letters
     digits_map = {'0':'۰', '1':'۱', '2':'۲', '3':'۳', '4':'۴', '5':'۵', '6':'۶', '7':'۷', '8':'۸', '9':'۹'}
     cleaned_chars = []
     
@@ -93,22 +96,41 @@ def format_persian_plate(raw_text):
         elif ch in LABEL_MAPPING.values() or ch.isalpha():
             cleaned_chars.append(ch)
             
-    joined = "".join(cleaned_chars)
-    
-    # Heuristic adjustment for common edge-case misreadings if length matches pattern
-    return joined
+    return "".join(cleaned_chars)
 
-# 5. Localization & Segmentation Pipeline
-def locate_and_crop_plate_gradient(img_bgr):
+# 5. Two-Stage Localization & Segmentation Pipeline
+def locate_plate_two_stage(img_bgr):
     h_img, w_img = img_bgr.shape[:2]
-    # Expand search zone to wider lower/middle part of image
-    ymin, ymax = int(h_img * 0.35), int(h_img * 0.92)
-    xmin, xmax = int(w_img * 0.05), int(w_img * 0.95)
-    roi = img_bgr[ymin:ymax, xmin:xmax]
+    car_crop = None
+    
+    # Stage 1: Isolate vehicle using YOLOv8 (COCO class 2 = car)
+    if yolo_vehicle_model is not None:
+        try:
+            results = yolo_vehicle_model(img_bgr, verbose=False, classes=[2])
+            best_car_area = 0
+            for r in results:
+                for box in r.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    area = (x2 - x1) * (y2 - y1)
+                    if area > best_car_area and area > 10000:
+                        best_car_area = area
+                        cx1, cy1 = max(0, x1), max(0, y1)
+                        cx2, cy2 = min(w_img, x2), min(h_img, y2)
+                        car_crop = img_bgr[cy1:cy2, cx1:cx2]
+        except Exception:
+            pass
+
+    target_area = car_crop if (car_crop is not None and car_crop.size > 0) else img_bgr
+    th_h, th_w = target_area.shape[:2]
+
+    # Stage 2: Gradient-based plate localization inside target area (lower-middle zone)
+    ymin, ymax = int(th_h * 0.4), int(th_h * 0.95)
+    xmin, xmax = int(th_w * 0.1), int(th_w * 0.9)
+    roi = target_area[ymin:ymax, xmin:xmax]
     
     if roi.size == 0:
-        return img_bgr
-    
+        return target_area
+
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
@@ -128,8 +150,7 @@ def locate_and_crop_plate_gradient(img_bgr):
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
         aspect_ratio = float(w) / float(h if h > 0 else 1)
-        # Wider aspect ratio tolerance for angled plates
-        if 2.0 < aspect_ratio < 7.0 and w > 35 and h > 8:
+        if 2.0 < aspect_ratio < 7.0 and w > 30 and h > 8:
             candidates.append((w * h, x, y, w, h))
             
     if candidates:
@@ -137,9 +158,9 @@ def locate_and_crop_plate_gradient(img_bgr):
         _, cx, cy, cw, ch = candidates[0]
         gx1 = max(0, xmin + cx - int(cw * 0.05))
         gy1 = max(0, ymin + cy - int(ch * 0.2))
-        gx2 = min(w_img, xmin + cx + cw + int(cw * 0.05))
-        gy2 = min(h_img, ymin + cy + ch + int(ch * 0.2))
-        crop_candidate = img_bgr[gy1:gy2, gx1:gx2]
+        gx2 = min(th_w, xmin + cx + cw + int(cw * 0.05))
+        gy2 = min(th_h, ymin + cy + ch + int(ch * 0.2))
+        crop_candidate = target_area[gy1:gy2, gx1:gx2]
         if crop_candidate.size > 0:
             return crop_candidate
         
@@ -161,7 +182,6 @@ def api_segment_and_recognize(cropped_plate_bgr):
         x, y, bw, bh = cv2.boundingRect(c)
         aspect_ratio = bw / float(bh if bh>0 else 1)
         height_ratio = bh / float(plate_height if plate_height>0 else 1)
-        # Relaxed character filtering bounds
         if 0.05 < aspect_ratio < 0.95 and 0.2 < height_ratio < 0.98 and bw < plate_width * 0.35:
             char_bounding_boxes.append((x, y, bw, bh))
             
@@ -185,7 +205,7 @@ def api_segment_and_recognize(cropped_plate_bgr):
     return format_persian_plate(final_plate_text)
 
 # 6. FastAPI Endpoints
-app = FastAPI(title="Persian End-to-End Frozen ALPR API")
+app = FastAPI(title="Persian Two-Stage ALPR API")
 
 @app.get("/history/", summary="Retrieve plate recognition history")
 async def get_plate_history(limit: int = 50):
@@ -221,7 +241,7 @@ async def predict_license_plate(file: UploadFile = File(...)):
         if img_bgr is None:
             raise ValueError("Invalid image format.")
 
-        plate_crop = locate_and_crop_plate_gradient(img_bgr)
+        plate_crop = locate_plate_two_stage(img_bgr)
         final_text = api_segment_and_recognize(plate_crop)
         
         if not final_text:
