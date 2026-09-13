@@ -98,7 +98,7 @@ def format_persian_plate(raw_text):
             
     return "".join(cleaned_chars)
 
-# 5. Two-Stage Localization & Segmentation Pipeline
+# 5. Two-Stage Anchor-based Localization & Segmentation Pipeline
 def locate_plate_two_stage(img_bgr):
     h_img, w_img = img_bgr.shape[:2]
     car_crop = None
@@ -123,50 +123,12 @@ def locate_plate_two_stage(img_bgr):
     target_area = car_crop if (car_crop is not None and car_crop.size > 0) else img_bgr
     th_h, th_w = target_area.shape[:2]
 
-    # Stage 2: Gradient-based plate localization focused on lower-middle bumper
-    ymin, ymax = int(th_h * 0.45), int(th_h * 0.92)
-    xmin, xmax = int(th_w * 0.08), int(th_w * 0.92)
-    roi = target_area[ymin:ymax, xmin:xmax]
+    # Stage 2: Direct Anchor ROI for front Iranian license plate zone (lower-middle bumper)
+    ymin, ymax = int(th_h * 0.65), int(th_h * 0.86)
+    xmin, xmax = int(th_w * 0.28), int(th_w * 0.72)
     
-    if roi.size == 0:
-        return target_area
-
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    
-    gradX = cv2.Sobel(enhanced, ddepth=cv2.CV_32F, dx=1, dy=0, ksize=-1)
-    gradX = np.absolute(gradX)
-    minVal, maxVal = np.min(gradX), np.max(gradX)
-    gradX = (255 * ((gradX - minVal) / (maxVal - minVal + 1e-5))).astype(np.uint8)
-    
-    rectKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
-    closed = cv2.morphologyEx(gradX, cv2.MORPH_CLOSE, rectKernel)
-    thresh = cv2.threshold(closed, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-    
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    candidates = []
-    
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        aspect_ratio = float(w) / float(h if h > 0 else 1)
-        if 2.2 < aspect_ratio < 6.5 and w > 40 and h > 10:
-            candidates.append((x, y, w, h)) # sort primarily by x coordinate (leftmost first)
-            
-    if candidates:
-        # Sort by x coordinate ascending to catch the left start of the Persian plate (24...)
-        candidates.sort(key=lambda item: item[0])
-        cx, cy, cw, ch = candidates[0]
-        # Expand horizontal window slightly to ensure full plate width is captured from left candidate
-        gx1 = max(0, xmin + cx - int(cw * 0.05))
-        gy1 = max(0, ymin + cy - int(ch * 0.2))
-        gx2 = min(th_w, xmin + cx + int(cw * 1.35))
-        gy2 = min(th_h, ymin + cy + ch + int(ch * 0.2))
-        crop_candidate = target_area[gy1:gy2, gx1:gx2]
-        if crop_candidate.size > 0:
-            return crop_candidate
-        
-    return roi
+    crop_candidate = target_area[ymin:ymax, xmin:xmax]
+    return crop_candidate if crop_candidate.size > 0 else target_area
 
 def api_segment_and_recognize(cropped_plate_bgr):
     cropped_plate = cropped_plate_bgr if cropped_plate_bgr is not None and cropped_plate_bgr.size > 0 else np.zeros((50, 150, 3), dtype=np.uint8)
@@ -207,7 +169,7 @@ def api_segment_and_recognize(cropped_plate_bgr):
     return format_persian_plate(final_plate_text)
 
 # 6. FastAPI Endpoints
-app = FastAPI(title="Persian Two-Stage ALPR API")
+app = FastAPI(title="Persian Two-Stage Anchor ALPR API")
 
 @app.get("/history/", summary="Retrieve plate recognition history")
 async def get_plate_history(limit: int = 50):
