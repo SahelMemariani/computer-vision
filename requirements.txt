@@ -1,5 +1,1 @@
-streamlit
-requests
-pandas
-Pillow
-numpy
+pip install -r requirements.txt
