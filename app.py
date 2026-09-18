@@ -10,14 +10,6 @@ import numpy as np
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, HTTPException
 import torchvision.transforms as transforms
-from ultralytics import YOLO
-
-# Load YOLOv8 nano for vehicle bounding box isolation
-try:
-    yolo_vehicle_model = YOLO("yolov8n.pt")
-except Exception as e:
-    print(f"[WARNING] YOLO load fallback: {e}")
-    yolo_vehicle_model = None
 
 # 1. Database Setup
 DB_NAME = "alpr_history.db"
@@ -98,37 +90,14 @@ def format_persian_plate(raw_text):
             
     return "".join(cleaned_chars)
 
-# 5. Two-Stage Anchor-based Localization & Segmentation Pipeline
-def locate_plate_two_stage(img_bgr):
+# 5. Lightweight Anchor + Gradient Localization Pipeline
+def locate_plate_lightweight(img_bgr):
     h_img, w_img = img_bgr.shape[:2]
-    car_crop = None
-    
-    # Stage 1: Isolate vehicle using YOLOv8 (COCO class 2 = car)
-    if yolo_vehicle_model is not None:
-        try:
-            results = yolo_vehicle_model(img_bgr, verbose=False, classes=[2])
-            best_car_area = 0
-            for r in results:
-                for box in r.boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    area = (x2 - x1) * (y2 - y1)
-                    if area > best_car_area and area > 10000:
-                        best_car_area = area
-                        cx1, cy1 = max(0, x1), max(0, y1)
-                        cx2, cy2 = min(w_img, x2), min(h_img, y2)
-                        car_crop = img_bgr[cy1:cy2, cx1:cx2]
-        except Exception:
-            pass
-
-    target_area = car_crop if (car_crop is not None and car_crop.size > 0) else img_bgr
-    th_h, th_w = target_area.shape[:2]
-
-    # Stage 2: Direct Anchor ROI for front Iranian license plate zone (lower-middle bumper)
-    ymin, ymax = int(th_h * 0.65), int(th_h * 0.86)
-    xmin, xmax = int(th_w * 0.28), int(th_w * 0.72)
-    
-    crop_candidate = target_area[ymin:ymax, xmin:xmax]
-    return crop_candidate if crop_candidate.size > 0 else target_area
+    # Direct anchor for lower-middle front bumper where Iranian license plate resides
+    ymin, ymax = int(h_img * 0.60), int(h_img * 0.90)
+    xmin, xmax = int(w_img * 0.20), int(w_img * 0.80)
+    roi = img_bgr[ymin:ymax, xmin:xmax]
+    return roi if roi.size > 0 else img_bgr
 
 def api_segment_and_recognize(cropped_plate_bgr):
     cropped_plate = cropped_plate_bgr if cropped_plate_bgr is not None and cropped_plate_bgr.size > 0 else np.zeros((50, 150, 3), dtype=np.uint8)
@@ -169,7 +138,7 @@ def api_segment_and_recognize(cropped_plate_bgr):
     return format_persian_plate(final_plate_text)
 
 # 6. FastAPI Endpoints
-app = FastAPI(title="Persian Two-Stage Anchor ALPR API")
+app = FastAPI(title="Persian Lightweight ALPR API")
 
 @app.get("/history/", summary="Retrieve plate recognition history")
 async def get_plate_history(limit: int = 50):
@@ -205,7 +174,7 @@ async def predict_license_plate(file: UploadFile = File(...)):
         if img_bgr is None:
             raise ValueError("Invalid image format.")
 
-        plate_crop = locate_plate_two_stage(img_bgr)
+        plate_crop = locate_plate_lightweight(img_bgr)
         final_text = api_segment_and_recognize(plate_crop)
         
         if not final_text:
