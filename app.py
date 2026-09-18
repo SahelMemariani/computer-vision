@@ -92,12 +92,48 @@ def format_persian_plate(raw_text):
 
 # 5. Lightweight Anchor + Gradient Localization Pipeline
 def locate_plate_lightweight(img_bgr):
-    h_img, w_img = img_bgr.shape[:2]
-    # Direct anchor for lower-middle front bumper where Iranian license plate resides
-    ymin, ymax = int(h_img * 0.60), int(h_img * 0.90)
-    xmin, xmax = int(w_img * 0.20), int(w_img * 0.80)
-    roi = img_bgr[ymin:ymax, xmin:xmax]
-    return roi if roi.size > 0 else img_bgr
+    h, w = img_bgr.shape[:2]
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    # فیلتر بلک‌هت برای جستجوی و برجسته‌سازی متن‌های تیره روی پس‌زمینه روشن
+    rectKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 5))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, rectKernel)
+
+    # یافتن لبه‌های عمودی پرکنتراست
+    gradX = cv2.Sobel(blackhat, ddepth=cv2.CV_32F, dx=1, dy=0, ksize=-1)
+    gradX = np.absolute(gradX)
+    (minVal, maxVal) = (np.min(gradX), np.max(gradX))
+    gradX = (255 * ((gradX - minVal) / (maxVal - minVal + 1e-5))).astype("uint8")
+
+    # یکپارچه‌سازی نواحی برای ساخت کادر پلاک
+    gradX = cv2.morphologyEx(gradX, cv2.MORPH_CLOSE, rectKernel)
+    thresh = cv2.threshold(gradX, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+
+    for c in contours:
+        x, y, bw, bh = cv2.boundingRect(c)
+        ar = bw / float(bh if bh > 0 else 1)
+        # پلاک‌های ایرانی کشیده هستند (فیلتر کردن مربع‌ها و خطوط)
+        if 2.5 < ar < 7.0 and bw > 40 and bh > 10:
+            candidates.append((x, y, bw, bh))
+
+    if candidates:
+        # انتخاب بزرگ‌ترین کاندیدای معتبر (احتمالاً خود پلاک)
+        candidates.sort(key=lambda b: b[2] * b[3], reverse=True)
+        cx, cy, cw, ch = candidates[0]
+
+        pad_x = int(cw * 0.05)
+        pad_y = int(ch * 0.15)
+        gx1 = max(0, cx - pad_x)
+        gy1 = max(0, cy - pad_y)
+        gx2 = min(w, cx + cw + pad_x)
+        gy2 = min(h, cy + ch + pad_y)
+
+        return img_bgr[gy1:gy2, gx1:gx2]
+
+    return img_bgr # بازگشت کل تصویر در صورت پیدا نشدن کاندیدا
 
 def api_segment_and_recognize(cropped_plate_bgr):
     cropped_plate = cropped_plate_bgr if cropped_plate_bgr is not None and cropped_plate_bgr.size > 0 else np.zeros((50, 150, 3), dtype=np.uint8)
