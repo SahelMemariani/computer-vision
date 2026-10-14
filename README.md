@@ -1,4 +1,4 @@
-Persian License Plate Recognition (ALPR)
+# Persian License Plate Recognition (ALPR)
 An end-to-end computer vision application that detects a vehicle in an image, localizes its license plate, and reads the Persian characters using a custom CNN built in PyTorch. Every recognition is stored in a database and can be reviewed from a web dashboard.
 How it works
 Image ──► YOLOv8 (vehicle detection) ──► plate localization ──► OpenCV preprocessing
